@@ -1630,6 +1630,30 @@ const lockBadges = l => {
   return b;
 };
 
+/* ---------- lock thumbnails: self-hosted mirror (v8.0.4b) ----------
+   The catalogue's photos live mostly on Flickr (live.staticflickr.com, ~80% of
+   locks). Loading a whole list of them from one phone trips Flickr's per-IP
+   rate limit (HTTP 429) and the thumbnails go blank — on THIS page and on
+   lpubelts.com too, since both hotlink the same Flickr images. To take that
+   load off Flickr, the thumbnails are mirrored into the phone repo
+   (thumbs/<lock id>.jpg, served by GitHub Pages) and the list loads the mirror
+   FIRST. A lock that isn't mirrored yet (one added since the last mirror run)
+   falls back to its real media source, then to the placeholder — so nothing is
+   ever worse than before, and new locks still show. Downloading + committing
+   the mirror is a manual step (mirror_thumbs.py; see PHONE-THUMBS.md).
+   NOTE: if your Pages repo/URL differs, THIS ONE CONSTANT is all you change. */
+const THUMB_BASE = "https://ckaralis85-spec.github.io/Lockhunter-phone/thumbs/";
+function thumbMirror(l){
+  return (l && l.id && l.img) ? THUMB_BASE + encodeURIComponent(l.id) + ".jpg" : null;
+}
+// onerror step-through: mirror -> the lock's real source (data-fb) -> placeholder.
+function thumbFallback(img){
+  const fb = img.getAttribute("data-fb");
+  if (fb){ img.removeAttribute("data-fb"); img.src = fb; return; }
+  if (img.classList && img.classList.contains("thumb")){ img.className = "thumb ph"; img.removeAttribute("src"); }
+  else { img.removeAttribute("src"); img.style.display = "none"; }
+}
+
 /* ---------- LOCKS view ---------- */
 function renderBeltChips(){
   const belts = ["All"].concat(LHC.CANONICAL_BELTS);
@@ -1667,7 +1691,7 @@ function renderLocks(){
       const l = rows[i];
       const li = document.createElement("li");
       li.innerHTML =
-        (l.img ? `<img class="thumb" loading="lazy" src="${esc(l.img)}" alt="" onerror="this.className='thumb ph';this.removeAttribute('src')">`
+        (l.img ? `<img class="thumb" loading="lazy" src="${esc(thumbMirror(l))}" data-fb="${esc(l.img)}" alt="" onerror="thumbFallback(this)">`
                : `<div class="thumb ph">▢</div>`) +
         `<div class="grow"><div class="lname">${esc(l.name)}</div>` +
         `<div class="lmeta">${beltPill(l)}<span class="stars">${LHC.starsTxt(l.count)}</span>` +
@@ -1696,7 +1720,7 @@ function openLock(l){
     ? `${l.count} LPU collector${l.count===1?"":"s"} own it`
     : "not in the collector-count data";
   $("sheetBody").innerHTML =
-    (l.img ? `<img id="sheetImg" src="${esc(l.img)}" alt="">` : "") +
+    (l.img ? `<img id="sheetImg" src="${esc(thumbMirror(l))}" data-fb="${esc(l.img)}" alt="" onerror="thumbFallback(this)">` : "") +
     `<div style="font-size:17px;font-weight:650;margin-top:10px">${esc(l.name)}</div>` +
     (l.version ? `<div class="muted" style="font-size:12.5px">${esc(l.version)}</div>` : "") +
     `<div class="lmeta" style="margin-top:6px">${beltPill(l)}` +
