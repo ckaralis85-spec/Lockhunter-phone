@@ -1630,6 +1630,30 @@ const lockBadges = l => {
   return b;
 };
 
+/* ---------- lock thumbnails: self-hosted mirror (v8.0.4b) ----------
+   The catalogue's photos live mostly on Flickr (live.staticflickr.com, ~80% of
+   locks). Loading a whole list of them from one phone trips Flickr's per-IP
+   rate limit (HTTP 429) and the thumbnails go blank — on THIS page and on
+   lpubelts.com too, since both hotlink the same Flickr images. To take that
+   load off Flickr, the thumbnails are mirrored into the phone repo
+   (thumbs/<lock id>.jpg, served by GitHub Pages) and the list loads the mirror
+   FIRST. A lock that isn't mirrored yet (one added since the last mirror run)
+   falls back to its real media source, then to the placeholder — so nothing is
+   ever worse than before, and new locks still show. Downloading + committing
+   the mirror is a manual step (mirror_thumbs.py; see PHONE-THUMBS.md).
+   NOTE: if your Pages repo/URL differs, THIS ONE CONSTANT is all you change. */
+const THUMB_BASE = "https://ckaralis85-spec.github.io/Lockhunter-phone/thumbs/";
+function thumbMirror(l){
+  return (l && l.id && l.img) ? THUMB_BASE + encodeURIComponent(l.id) + ".jpg" : null;
+}
+// onerror step-through: mirror -> the lock's real source (data-fb) -> placeholder.
+function thumbFallback(img){
+  const fb = img.getAttribute("data-fb");
+  if (fb){ img.removeAttribute("data-fb"); img.src = fb; return; }
+  if (img.classList && img.classList.contains("thumb")){ img.className = "thumb ph"; img.removeAttribute("src"); }
+  else { img.removeAttribute("src"); img.style.display = "none"; }
+}
+
 /* ---------- LOCKS view ---------- */
 function renderBeltChips(){
   const belts = ["All"].concat(LHC.CANONICAL_BELTS);
@@ -1667,7 +1691,7 @@ function renderLocks(){
       const l = rows[i];
       const li = document.createElement("li");
       li.innerHTML =
-        (l.img ? `<img class="thumb" loading="lazy" src="${esc(l.img)}" alt="" onerror="this.className='thumb ph';this.removeAttribute('src')">`
+        (l.img ? `<img class="thumb" loading="lazy" src="${esc(thumbMirror(l))}" data-fb="${esc(l.img)}" alt="" onerror="thumbFallback(this)">`
                : `<div class="thumb ph">▢</div>`) +
         `<div class="grow"><div class="lname">${esc(l.name)}</div>` +
         `<div class="lmeta">${beltPill(l)}<span class="stars">${LHC.starsTxt(l.count)}</span>` +
@@ -1696,7 +1720,7 @@ function openLock(l){
     ? `${l.count} LPU collector${l.count===1?"":"s"} own it`
     : "not in the collector-count data";
   $("sheetBody").innerHTML =
-    (l.img ? `<img id="sheetImg" src="${esc(l.img)}" alt="">` : "") +
+    (l.img ? `<img id="sheetImg" src="${esc(thumbMirror(l))}" data-fb="${esc(l.img)}" alt="" onerror="thumbFallback(this)">` : "") +
     `<div style="font-size:17px;font-weight:650;margin-top:10px">${esc(l.name)}</div>` +
     (l.version ? `<div class="muted" style="font-size:12.5px">${esc(l.version)}</div>` : "") +
     `<div class="lmeta" style="margin-top:6px">${beltPill(l)}` +
@@ -1764,28 +1788,38 @@ async function runCompare(){
   const msg = $("cmpMsg");
   const uid = LHC.extractUid($("cmpUrl").value.trim());
   if (!uid) { msg.textContent = "Paste a profile link with /profile/<id> in it."; msg.className="msg err"; return; }
-  msg.textContent = "Asking your PC to read their collection… (up to ~30 s)"; msg.className="msg";
   $("cmpBtn").disabled = true;
   try {
-    // v1.7.0+: the PC reads the other member's collection for us — one request to
-    // LPU's profile service (fetch_other_profile on the PC, desktop v7.0.1+). Neither
-    // the phone nor the PC touches LPU's database.
-    await ensurePc();
-    const why = pcStateMessage("Compare");
-    if (why) throw new Error(why);
-    // the PC runs one profile read at a time and the phone's own collection
-    // sync now shares that lock (v1.8.5) — wait it out instead of failing
-    let r = null, j = null;
-    for (let attempt = 0; attempt < 4; attempt++){
-      if (attempt) await new Promise(res => setTimeout(res, 3000));
-      r = await lanApi("/api/compare?uid=" + encodeURIComponent(uid), null, 45000);
-      if (r.status !== 409) break;
-      msg.textContent = "Your PC is busy reading a profile — waiting…";
+    let theirs;
+    if (LAN_MODE){
+      // PC-served copy (unchanged): the PC reads the other member's collection
+      // for us — one request to LPU's user service. It isn't bound by the
+      // browser's cross-origin rule and it serialises reads. Neither the phone
+      // nor the PC touches LPU's database.
+      msg.textContent = "Asking your PC to read their collection… (up to ~30 s)"; msg.className="msg";
+      await ensurePc();
+      const why = pcStateMessage("Compare");
+      if (why) throw new Error(why);
+      // the PC runs one profile read at a time and the phone's own collection
+      // sync now shares that lock (v1.8.5) — wait it out instead of failing
+      let r = null, j = null;
+      for (let attempt = 0; attempt < 4; attempt++){
+        if (attempt) await new Promise(res => setTimeout(res, 3000));
+        r = await lanApi("/api/compare?uid=" + encodeURIComponent(uid), null, 45000);
+        if (r.status !== 409) break;
+        msg.textContent = "Your PC is busy reading a profile — waiting…";
+      }
+      try { j = await r.json(); } catch (e) {}
+      if (r.status === 404) throw new Error("your PC's Lock Hunter is older than this page — update it to v6.2.8+");
+      if (!r.ok || !j || !j.ok) throw new Error((j && j.error) || ("PC returned HTTP " + r.status));
+      theirs = {own: new Set((j.own || []).map(String)), wish: new Set((j.wish || []).map(String))};
+    } else {
+      // v8.0.4b: no PC (the standalone web copy) — read the other collector
+      // straight from LPU's open user API, exactly as this copy already reads
+      // YOUR collection. Same cross-origin-allowed endpoint, one request, no PC.
+      msg.textContent = "Reading their collection from LPU…"; msg.className="msg";
+      theirs = await fetchProfileFromLPU(uid);   // {own:Set, wish:Set}
     }
-    try { j = await r.json(); } catch (e) {}
-    if (r.status === 404) throw new Error("your PC's Lock Hunter is older than this page — update it to v6.2.8+");
-    if (!r.ok || !j || !j.ok) throw new Error((j && j.error) || ("PC returned HTTP " + r.status));
-    const theirs = {own: new Set((j.own || []).map(String)), wish: new Set((j.wish || []).map(String))};
     if (!theirs.own.size && !theirs.wish.size)
       throw new Error("that profile has no owned or wishlist locks saved (or it's private)");
     // Trade check — mirrors the desktop app's Compare (_compare_worker):
@@ -1812,7 +1846,7 @@ async function runCompare(){
     S.cmpResults = {uid, who, whoP, theySide, youHave, theirOwnN: theirs.own.size};
     renderCompare();
   } catch(ex) { msg.textContent = "Compare failed: " + ex.message; msg.className = "msg err"; }
-  finally { $("cmpBtn").disabled = !LAN_MODE; }   // web copy: stays disabled (C20)
+  finally { $("cmpBtn").disabled = false; }   // v8.0.4b: both copies run Compare
 }
 // v8.0.2: which Compare view is showing. Stored, so the choice survives a
 // reload the way the desktop's does - and wiped by "Clear local data" with
@@ -2587,11 +2621,9 @@ async function boot(){
       };
     }
   }
-  if (!LAN_MODE) {   // web copy: Compare runs through the PC — say so up front, disable the button (C20)
-    const wn = $("cmpWebNote");
-    if (wn){ wn.style.display = ""; wn.textContent = "Compare runs through Lock Hunter on your PC. Open the copy served by your PC (Settings… → Phone link → Set up…) to use it."; }
-    $("cmpBtn").disabled = true;
-  }
+  // v8.0.4b: the web copy runs Compare itself now — it reads the other collector
+  // from LPU's open user API, the same way it reads your own collection — so the
+  // button is left enabled and the old "runs through your PC" note stays hidden.
   // Compare rows -> open that lock's detail sheet
   $("cmpOut").onclick = (e) => { const r = e.target.closest(".orow[data-lock]"); if (r){ const l = S.byId.get(r.dataset.lock); if (l) openLock(l); } };
   $("sheetBack").onclick = closeSheet;
@@ -2622,10 +2654,10 @@ async function boot(){
   if ((!S.profile && !store.get("obskip", false)) || obRestart) {
     $("onboard").classList.add("open");
     if (!LAN_MODE) {
-      // v8.0.4: the standalone web copy reads your collection straight from
-      // LPU's new open user API (cross-origin allowed now), no PC needed. Live
-      // search and Compare still need Lock Hunter on your PC.
-      $("obMsg").textContent = "This is the standalone web copy — paste your LPU profile link above and it loads your collection straight from LPU, no PC needed. (Live search and Compare still need Lock Hunter on your PC.)"; $("obMsg").className = "msg";
+      // v8.0.4b: the standalone web copy reads your collection AND runs Compare
+      // straight from LPU's open user API (cross-origin allowed now), no PC
+      // needed. Only live search still needs Lock Hunter on your PC.
+      $("obMsg").textContent = "This is the standalone web copy — paste your LPU profile link above and it loads your collection straight from LPU, no PC needed. (Live search still needs Lock Hunter on your PC.)"; $("obMsg").className = "msg";
     } else if (!LAN.token) {
       // PC-served copy but not paired yet: pairing lives on the Search tab, which
       // this overlay covers — so offer the pairing box right here (B6)
