@@ -208,10 +208,10 @@ a.plain{color:var(--accent); text-decoration:none}
 <section class="view" id="view-compare">
   <div class="card">
     <h2>Compare collections</h2>
-    <div class="muted" style="margin-bottom:8px">Paste another collector's lpubelts profile link to compare their collection with yours. Find collectors on the
+    <div class="muted" style="margin-bottom:8px">Type another collector's name (e.g. Sidepicks) or paste their lpubelts profile link to compare their collection with yours. Find collectors on the
       <a class="plain" href="https://lpubelts.com/#/leaderboard/locks" target="_blank" rel="noopener">LPU leaderboard</a>.</div>
     <div id="cmpWebNote" class="msg" style="display:none"></div>
-    <input type="url" id="cmpUrl" placeholder="https://lpubelts.com/#/profile/…">
+    <input type="text" id="cmpUrl" placeholder="Name (e.g. Sidepicks) or profile link">
     <div class="row" style="margin-top:8px">
       <button class="primary grow" id="cmpBtn">Compare</button>
     </div>
@@ -1653,6 +1653,10 @@ function thumbFallback(img){
   if (img.classList && img.classList.contains("thumb")){ img.className = "thumb ph"; img.removeAttribute("src"); }
   else { img.removeAttribute("src"); img.style.display = "none"; }
 }
+// The list/detail <img> use an inline onerror="thumbFallback(this)", and inline
+// handlers run in the GLOBAL scope — not this IIFE — so thumbFallback has to be
+// reachable there or a failed thumbnail would throw instead of falling back.
+window.thumbFallback = thumbFallback;
 
 /* ---------- LOCKS view ---------- */
 function renderBeltChips(){
@@ -1784,12 +1788,59 @@ function renderCollection(){
 }
 
 /* ---------- COMPARE view ---------- */
+// v8.0.4d: Compare accepts a collector NAME as well as a profile link. A value
+// that isn't a link is resolved to a uid from LPU's public leaderboard feed
+// (displayName -> id), fetched once and cached (the feed also sends a 2-day
+// cache header). Matching is case-insensitive; a name shared by more than one
+// collector resolves to the highest-ranked (most recorded locks) and says so.
+const LPU_LEADERBOARD = "https://explore.lpubelts.com/data/leaderboardData.json";
+let _lbIndex = null;                       // lowercased name -> [{id, name, score}]
+async function loadLeaderboardIndex(){
+  if (_lbIndex) return _lbIndex;
+  let r;
+  try { r = await fetch(LPU_LEADERBOARD, {cache: "force-cache"}); }
+  catch (ex) { throw new Error("couldn't reach the LPU leaderboard — check your connection"); }
+  if (!r.ok) throw new Error("LPU leaderboard returned HTTP " + r.status);
+  const d = await r.json();
+  const arr = Array.isArray(d) ? d : ((d && d.data) || []);
+  const idx = new Map();
+  for (const x of arr){
+    const nm = String((x && x.displayName) || "").trim();
+    if (!nm || nm.toLowerCase() === "no display name" || !x.id) continue;
+    const k = nm.toLowerCase();
+    const score = Number(x.recordedLocks || x.own || x.locksCollection || 0) || 0;
+    const list = idx.get(k) || []; list.push({id: String(x.id), name: nm, score}); idx.set(k, list);
+  }
+  _lbIndex = idx; return idx;
+}
+// A link short-circuits to extractUid; anything else is looked up as a name.
+// Returns {uid, who, ambiguous, alt} or null when nothing matched.
+async function resolveCollector(raw){
+  const s = String(raw || "").trim();
+  const uid = LHC.extractUid(s);
+  if (uid) return {uid, who: null, ambiguous: false, alt: 0};
+  if (!s) return null;
+  const hits = ((await loadLeaderboardIndex()).get(s.toLowerCase()) || [])
+                 .slice().sort((a, b) => b.score - a.score);
+  if (!hits.length) return null;
+  return {uid: hits[0].id, who: hits[0].name, ambiguous: hits.length > 1, alt: hits.length - 1};
+}
+window.resolveCollector = resolveCollector;   // exposed for the name-resolution tests
 async function runCompare(){
   const msg = $("cmpMsg");
-  const uid = LHC.extractUid($("cmpUrl").value.trim());
-  if (!uid) { msg.textContent = "Paste a profile link with /profile/<id> in it."; msg.className="msg err"; return; }
+  const raw = $("cmpUrl").value.trim();
+  if (!raw) { msg.textContent = "Enter a collector's name (e.g. Sidepicks) or paste their profile link."; msg.className="msg err"; return; }
   $("cmpBtn").disabled = true;
   try {
+    let res;
+    try { res = await resolveCollector(raw); }
+    catch (ex) { throw new Error(ex.message || "couldn't look up that collector"); }
+    if (!res || !res.uid)
+      throw new Error("No collector named “" + raw + "” on the LPU leaderboard — check the spelling, or paste their profile link.");
+    const uid = res.uid;
+    let whoName = res.who || "";
+    if (!whoName){ const _nm = raw.match(/[?&]name=([^&]+)/); if (_nm) whoName = decodeURIComponent(_nm[1]).replace(/_/g," ").trim(); }
+    if (res.who){ msg.textContent = "Found " + res.who + (res.ambiguous ? " (top of " + (res.alt+1) + " with that name)" : "") + " — reading their collection…"; msg.className = "msg"; }
     let theirs;
     if (LAN_MODE){
       // PC-served copy (unchanged): the PC reads the other member's collection
@@ -1840,8 +1891,7 @@ async function runCompare(){
     const theySide = bySort([...theirs.own].filter(id => !S.own.has(id)).map(lk))
                        .map(l => ({lock: l, wish: S.wish.has(l.id)}));
     const youHave  = bySort([...S.own].filter(id => theirs.wish.has(id)).map(lk));
-    const nm = $("cmpUrl").value.match(/[?&]name=([^&]+)/);
-    const who = nm ? decodeURIComponent(nm[1]).replace(/_/g," ").trim() || "They" : "They";
+    const who = whoName || "They";
     const whoP = (who === "They") ? "their" : who + "’s";
     S.cmpResults = {uid, who, whoP, theySide, youHave, theirOwnN: theirs.own.size};
     renderCompare();
