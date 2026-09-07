@@ -51,7 +51,7 @@ set "MIRROR_NO_PAUSE=1"
 if errorlevel 1 goto :dl_failed
 
 echo.
-echo  [3/4] Mirroring your collection (Owned + Wishlist)...
+echo  [3/4] Mirroring your collection (and any compare targets)...
 if exist "mirror_profile.py" (
     %PYEXE% "mirror_profile.py"
 ) else (
@@ -61,6 +61,7 @@ if exist "mirror_profile.py" (
 echo.
 echo  [4/4] Publishing changes...
 git add thumbs collection.json
+if exist "collections" git add collections
 git diff --cached --quiet && goto :nothing
 git commit -m "Update mirrored thumbnails and collection"
 git push

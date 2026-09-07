@@ -274,7 +274,7 @@ a.plain{color:var(--accent); text-decoration:none}
    ===================================================================== */
 "use strict";
 const LHC = (() => {
-  const VERSION = "1.9.1";
+  const VERSION = "1.9.2";
   const CANONICAL_BELTS = ["White","Yellow","Orange","Green","Blue","Purple",
                            "Brown","Red","Black","Unranked"];
   const BELT_RANK = Object.fromEntries(CANONICAL_BELTS.map((b,i)=>[b,i]));
@@ -1183,27 +1183,34 @@ function lpuBlocked(detail){
 }
 // v8.0.5: the hosted phone can't read LPU's OLD profile endpoint directly (it
 // sends no cross-origin header) and the NEW one went down (503). So the PC —
-// which CAN read the old endpoint — mirrors your Owned + Wishlist to a static
-// collection.json on your GitHub Pages repo (mirror_profile.py), and the phone
-// reads THAT when its live LPU read fails. Same host as the thumbnails, so it is
-// same-origin for the hosted page: no LPU call from the phone at all. Only YOUR
-// OWN mirrored profile matches its uid; Compare of anyone else falls through and
-// still needs the PC.
+// which CAN read the old endpoint — mirrors collections to static JSON on your
+// GitHub Pages repo (mirror_profile.py), and the phone reads THOSE when its live
+// LPU read fails. Same host as the thumbnails, so it is same-origin for the
+// hosted page: no LPU call from the phone at all. Two places are checked:
+//   collections/<uid>.json  — your own AND any Compare target you mirror
+//   collection.json         — your own (kept for older pages)
+// Every read still verifies the uid, so nothing is ever served under the wrong
+// member. A member you have NOT mirrored just falls through (Compare of them
+// still needs the PC, or add them to compare_targets.txt and re-run the mirror).
 const COLLECTION_MIRROR = "https://ckaralis85-spec.github.io/Lockhunter-phone/collection.json";
-async function fetchProfileFromMirror(uid){
+const COLLECTIONS_BASE = "https://ckaralis85-spec.github.io/Lockhunter-phone/collections/";
+function _mirrorSet(a){ return new Set((Array.isArray(a) ? a : []).map(String)); }
+async function _mirrorRead(url, uid){
   let r;
-  try { r = await fetch(COLLECTION_MIRROR, {cache: "no-store"}); }
-  catch (e) { return null; }
+  try { r = await fetch(url, {cache: "no-store"}); } catch (e) { return null; }
   if (!r.ok) return null;
   let j = null;
   try { j = await r.json(); } catch (e) { return null; }
-  if (!j || String(j.uid || "") !== String(uid)) return null;   // not your mirrored profile
-  const toSet = a => new Set((Array.isArray(a) ? a : []).map(String));
-  return { own: toSet(j.own), wish: toSet(j.wish), mirrored: true, updated: String(j.updated || "") };
+  if (!j || String(j.uid || "") !== String(uid)) return null;   // wrong / missing member
+  return { own: _mirrorSet(j.own), wish: _mirrorSet(j.wish), mirrored: true, updated: String(j.updated || "") };
+}
+async function fetchProfileFromMirror(uid){
+  return (await _mirrorRead(COLLECTIONS_BASE + encodeURIComponent(String(uid)) + ".json", uid))
+      || (await _mirrorRead(COLLECTION_MIRROR, uid));
 }
 // The live read first, then the mirror as a fallback. A member the mirror does
-// not hold (Compare) re-throws the live error unchanged, so its kind/wording is
-// preserved and nothing is ever served under the wrong member.
+// not hold re-throws the live error unchanged, so its kind/wording is preserved
+// and nothing is ever served under the wrong member.
 async function fetchProfileFromLPU(uid){
   try {
     return await fetchProfileLiveFromLPU(uid);
