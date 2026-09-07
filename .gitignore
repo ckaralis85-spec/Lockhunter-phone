@@ -1,0 +1,7 @@
+# Lock Hunter phone repo — publish only what the phone serves.
+# The PC tooling below stays on your machine so UPDATE-THUMBS.bat keeps working,
+# but is never pushed to GitHub, so no one else gets it or can run it.
+# The phone needs only: index.html, thumbs/, collection.json, collections/
+*.bat
+*.py
+compare_targets.txt
