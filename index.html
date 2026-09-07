@@ -208,10 +208,10 @@ a.plain{color:var(--accent); text-decoration:none}
 <section class="view" id="view-compare">
   <div class="card">
     <h2>Compare collections</h2>
-    <div class="muted" style="margin-bottom:8px">Type another collector's name (e.g. Sidepicks) or paste their lpubelts profile link to compare their collection with yours. Find collectors on the
+    <div class="muted" style="margin-bottom:8px">Type another collector's name (e.g. Ferf) or paste their lpubelts profile link to compare their collection with yours. Find collectors on the
       <a class="plain" href="https://lpubelts.com/#/leaderboard/locks" target="_blank" rel="noopener">LPU leaderboard</a>.</div>
     <div id="cmpWebNote" class="msg" style="display:none"></div>
-    <input type="text" id="cmpUrl" placeholder="Name (e.g. Sidepicks) or profile link">
+    <input type="text" id="cmpUrl" placeholder="Name (e.g. Ferf) or profile link">
     <div class="row" style="margin-top:8px">
       <button class="primary grow" id="cmpBtn">Compare</button>
     </div>
@@ -246,16 +246,17 @@ a.plain{color:var(--accent); text-decoration:none}
   <div class="card">
     <h2>Sync your collection</h2>
     <div class="muted" style="margin-bottom:10px">
-      Paste your <a class="plain" href="https://lpubelts.com" target="_blank" rel="noopener">lpubelts.com</a>
-      profile link and your owned locks + wishlist load from LPU.
-      (Open lpubelts.com, go to your profile, copy the address.) You can always change it
-      later on the <b>Collection</b> tab.
+      Type your name (e.g. Ferf) — or paste your
+      <a class="plain" href="https://lpubelts.com" target="_blank" rel="noopener">lpubelts.com</a>
+      profile link — and your owned locks + wishlist load from LPU.
+      (A name is matched on the LPU leaderboard; if yours isn't there yet, paste the link instead.)
+      You can always change it later on the <b>Collection</b> tab.
     </div>
     <div id="obPairRow" class="row" style="display:none;margin-bottom:8px">
       <input id="obTok" type="text" class="grow" placeholder="Pairing code from your PC" autocapitalize="off" autocomplete="off" spellcheck="false">
       <button id="obPairGo">Connect</button>
     </div>
-    <input type="url" id="obUrl" placeholder="https://lpubelts.com/#/profile/…">
+    <input type="text" id="obUrl" placeholder="Your name (e.g. Ferf) or lpubelts.com profile link">
     <div class="row" style="margin-top:10px">
       <button class="primary grow" id="obGo">Load my collection</button>
       <button id="obSkip">Skip</button>
@@ -273,7 +274,7 @@ a.plain{color:var(--accent); text-decoration:none}
    ===================================================================== */
 "use strict";
 const LHC = (() => {
-  const VERSION = "1.9.0";
+  const VERSION = "1.9.1";
   const CANONICAL_BELTS = ["White","Yellow","Orange","Green","Blue","Purple",
                            "Brown","Red","Black","Unranked"];
   const BELT_RANK = Object.fromEntries(CANONICAL_BELTS.map((b,i)=>[b,i]));
@@ -1180,7 +1181,39 @@ function lpuBlocked(detail){
     "if it keeps happening, sync on the PC instead and the phone will pick it up.");
   e.kind = "blocked"; return e;
 }
+// v8.0.5: the hosted phone can't read LPU's OLD profile endpoint directly (it
+// sends no cross-origin header) and the NEW one went down (503). So the PC —
+// which CAN read the old endpoint — mirrors your Owned + Wishlist to a static
+// collection.json on your GitHub Pages repo (mirror_profile.py), and the phone
+// reads THAT when its live LPU read fails. Same host as the thumbnails, so it is
+// same-origin for the hosted page: no LPU call from the phone at all. Only YOUR
+// OWN mirrored profile matches its uid; Compare of anyone else falls through and
+// still needs the PC.
+const COLLECTION_MIRROR = "https://ckaralis85-spec.github.io/Lockhunter-phone/collection.json";
+async function fetchProfileFromMirror(uid){
+  let r;
+  try { r = await fetch(COLLECTION_MIRROR, {cache: "no-store"}); }
+  catch (e) { return null; }
+  if (!r.ok) return null;
+  let j = null;
+  try { j = await r.json(); } catch (e) { return null; }
+  if (!j || String(j.uid || "") !== String(uid)) return null;   // not your mirrored profile
+  const toSet = a => new Set((Array.isArray(a) ? a : []).map(String));
+  return { own: toSet(j.own), wish: toSet(j.wish), mirrored: true, updated: String(j.updated || "") };
+}
+// The live read first, then the mirror as a fallback. A member the mirror does
+// not hold (Compare) re-throws the live error unchanged, so its kind/wording is
+// preserved and nothing is ever served under the wrong member.
 async function fetchProfileFromLPU(uid){
+  try {
+    return await fetchProfileLiveFromLPU(uid);
+  } catch (ex) {
+    const m = await fetchProfileFromMirror(uid);
+    if (m) return m;
+    throw ex;
+  }
+}
+async function fetchProfileLiveFromLPU(uid){
   // the desktop passes timeout=30 to requests.get; a phone on a half-open
   // Wi-Fi link would otherwise sit on "Reading your collection…" for ever.
   // The guard has to cover the BODY as well as the headers: fetch() resolves
@@ -1329,6 +1362,27 @@ async function syncProfile(url, msgEl, opts){
   }
   let link = profileLinkFor(url);
   let uid = LHC.extractUid(link);
+  // v8.0.4: the profile box takes a NAME now, exactly like Compare does — type
+  // "Ferf" instead of hunting down your own profile link. Only when something
+  // was actually typed here (a blank refresh still falls through to the PC's /
+  // saved link below) and it wasn't already a link or id we could read. The
+  // NAME is never stored — what we save is the canonical profile URL it
+  // resolves to, so every later reconnect keys off the id, not the spelling.
+  let chosenByName = false;
+  if (!uid && url && String(url).trim()){
+    let res = null;
+    try { res = await resolveCollector(String(url).trim()); } catch(e){}
+    if (res && res.uid){
+      uid = res.uid;
+      link = LHC.canonicalProfileUrl(uid) || ("https://lpubelts.com/#/profile/" + uid);
+      chosenByName = true;
+      if (res.who){
+        profMsg(msgEl, "Found " + res.who +
+          (res.ambiguous ? " (top of " + (res.alt + 1) + " with that name)" : "") +
+          " — reading your collection…", "msg");
+      }
+    }
+  }
   // No link anywhere yet? A connected PC knows its own — take it and use it
   // for the LPU read, so a paired phone still syncs with nothing typed. This
   // is the one path where the PC is worth waiting for.
@@ -1336,8 +1390,9 @@ async function syncProfile(url, msgEl, opts){
     await ensurePc();
     const first = await syncProfileViaPc();
     if (!first){
-      profMsg(msgEl, "Paste your lpubelts.com profile link — the one with /profile/<id> in it, " +
-        "or just your member id. Open lpubelts.com, go to your profile and copy the address.",
+      profMsg(msgEl, "Type your name (e.g. Ferf), or paste your lpubelts.com profile link — the " +
+        "one with /profile/<id> in it. A name that doesn't load isn't on the LPU leaderboard yet; " +
+        "paste the link instead.",
         "msg err"); return false;
     }
     link = String(first.url || ""); uid = LHC.extractUid(link) || "";
@@ -1384,6 +1439,8 @@ async function syncProfile(url, msgEl, opts){
     try {
       const got = await fetchProfileFromLPU(uid);
       own = got.own; wish = got.wish;
+      // v8.0.5: be honest when this came from the PC-written mirror, not live LPU.
+      if (got.mirrored) from = "your saved copy" + (got.updated ? " (" + got.updated.slice(0, 10) + ")" : "");
     } catch(ex) {
       // 3. Last resort: the collection the PC already had saved — and only
       //    when the call never GOT THROUGH and the PC holds the SAME member.
@@ -1408,7 +1465,7 @@ async function syncProfile(url, msgEl, opts){
   // paste falls through to the PC's profile below, and marking THAT as this
   // phone's own choice both hid the bad paste and pinned the phone to the
   // PC's current member for good.
-  const mine = url ? (!opts.fromPc && !!LHC.extractUid(String(url)))
+  const mine = url ? (!opts.fromPc && (!!LHC.extractUid(String(url)) || chosenByName))
                    : !!(S.profile && S.profile.mine);
   finishSync(own, wish, uid, link, from, msgEl, {silent: !!opts.silent, mine});
   return true;
@@ -1538,7 +1595,7 @@ function renderProfileCard(){
             : (S.profile ? "Update profile" : "Load my collection");
   let html = head;
   if (askBox){
-    html += `<input type="url" id="profUrl" placeholder="lpubelts.com profile link, or just the member id" ` +
+    html += `<input type="text" id="profUrl" placeholder="Your name (e.g. Ferf) or lpubelts.com profile link" ` +
             `style="margin-top:8px" value="${esc(prefill)}">`;
   }
   html += `<div class="row" style="margin-top:8px">` +
@@ -1829,7 +1886,7 @@ window.resolveCollector = resolveCollector;   // exposed for the name-resolution
 async function runCompare(){
   const msg = $("cmpMsg");
   const raw = $("cmpUrl").value.trim();
-  if (!raw) { msg.textContent = "Enter a collector's name (e.g. Sidepicks) or paste their profile link."; msg.className="msg err"; return; }
+  if (!raw) { msg.textContent = "Enter a collector's name (e.g. Ferf) or paste their profile link."; msg.className="msg err"; return; }
   $("cmpBtn").disabled = true;
   try {
     let res;
@@ -2707,12 +2764,12 @@ async function boot(){
       // v8.0.4b: the standalone web copy reads your collection AND runs Compare
       // straight from LPU's open user API (cross-origin allowed now), no PC
       // needed. Only live search still needs Lock Hunter on your PC.
-      $("obMsg").textContent = "This is the standalone web copy — paste your LPU profile link above and it loads your collection straight from LPU, no PC needed. (Live search still needs Lock Hunter on your PC.)"; $("obMsg").className = "msg";
+      $("obMsg").textContent = "This is the standalone web copy — type your name or paste your LPU profile link above and it loads your collection straight from LPU, no PC needed. (Live search still needs Lock Hunter on your PC.)"; $("obMsg").className = "msg";
     } else if (!LAN.token) {
       // PC-served copy but not paired yet: pairing lives on the Search tab, which
       // this overlay covers — so offer the pairing box right here (B6)
       const pr = $("obPairRow"); if (pr) pr.style.display = "flex";
-      $("obMsg").textContent = "Your collection loads from the profile link above — no pairing needed for that. The pairing code below is only for live search from this phone (Lock Hunter → Settings… → Phone link → Set up…)."; $("obMsg").className = "msg";
+      $("obMsg").textContent = "Your collection loads from the name or profile link above — no pairing needed for that. The pairing code below is only for live search from this phone (Lock Hunter → Settings… → Phone link → Set up…)."; $("obMsg").className = "msg";
       $("obPairGo").onclick = async () => {
         const t = ($("obTok").value || "").trim();
         if (!t) return;
